@@ -5,7 +5,7 @@
 ║                                                      ║
 ║  Requirements:                                       ║
 ║    pip install pyrogram==2.0.106                     ║
-║    pip install pytgcalls==0.9.11.2                   ║
+║    pip install py-tgcalls                            ║
 ║    pip install yt-dlp                                ║
 ║    pip install aiohttp aiofiles                      ║
 ║                                                      ║
@@ -26,15 +26,16 @@ from pyrogram.types import (
     Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 )
 
+# ── py-tgcalls 2.x imports ────────────────────────────
 from pytgcalls import PyTgCalls
-from pytgcalls.types import MediaStream
-from pytgcalls.types.stream import StreamAudioEnded
+from pytgcalls.types import MediaStream, AudioParameters, Update
+# ─────────────────────────────────────────────────────
 
 import yt_dlp
 
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 #   CONFIG — Fill these in before running
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 
 API_ID      = 30324020             # From my.telegram.org
 API_HASH    = "db4b2ca65a6ed07ffc4e1fc28ffc87cb"             # From my.telegram.org
@@ -46,10 +47,10 @@ MAX_DURATION = 3600          # 1 hour in seconds
 DOWNLOAD_DIR = "./downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 #   BANNER IMAGES
 #   Replace placeholder URLs with your own Telegraph/Imgur links
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 
 IMAGES = {
     "start":   "https://telegra.ph/file/5b9e2d58a4b4d5d4a8e5c.jpg",
@@ -63,9 +64,9 @@ IMAGES = {
     "stats":   "https://telegra.ph/file/3h8k0l2ei2j2k3l2i6m3k.jpg",
 }
 
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 #   LOGGING
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 
 logging.basicConfig(
     level=logging.INFO,
@@ -73,9 +74,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 #   STATE
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 
 queues           : dict[int, list]   = defaultdict(list)   # chat_id → song list
 loop_state       : dict[int, object] = {}                   # False | True | int
@@ -88,16 +89,16 @@ songs_played     : int               = 0
 all_users        : set               = set()
 active_groups    : set               = set()
 
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 #   CLIENT INIT
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 
 app  = Client("musicverse", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 call = PyTgCalls(app)
 
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 #   HELPERS
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 
 def fmt_time(seconds: int) -> str:
     m, s = divmod(int(seconds), 60)
@@ -224,7 +225,15 @@ async def play_next(client: Client, chat_id: int):
         queues[chat_id][0]["file"] = file_path
 
     try:
-        await call.join_group_call(chat_id, MediaStream(file_path))
+        # py-tgcalls 2.x: call.play() handles both joining and playing.
+        # MediaStream.Flags.IGNORE disables the video track (audio-only stream).
+        await call.play(
+            chat_id,
+            MediaStream(
+                file_path,
+                video_flags=MediaStream.Flags.IGNORE,
+            )
+        )
         now_playing[chat_id]  = song
         stream_start[chat_id] = time.time()
         songs_played          += 1
@@ -261,12 +270,15 @@ async def play_next(client: Client, chat_id: int):
         await play_next(client, chat_id)
 
 
-# ─────────────────────────────────────────────────────────
-#   STREAM ENDED
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
+#   STREAM ENDED  (py-tgcalls 2.x)
+#   Decorator: @call.on_stream_end()
+#   Callback receives (client, update: Update)
+#   update.chat_id  — the group chat id
+# ─────────────────────────────────────────────────────
 
 @call.on_stream_end()
-async def on_stream_end(_, update: StreamAudioEnded):
+async def on_stream_end(client, update: Update):
     chat_id = update.chat_id
     ls      = loop_state.get(chat_id, False)
 
@@ -286,9 +298,44 @@ async def on_stream_end(_, update: StreamAudioEnded):
         await play_next(app, chat_id)
 
 
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
+#   AUTO-STOP WHEN VC IS EMPTY  (py-tgcalls 2.x)
+#   Decorator: @call.on_participants_change()
+#   Callback receives (client, update: Update)
+#   update.chat_id       — the group chat id
+#   update.participants  — list of current participants
+# ─────────────────────────────────────────────────────
+
+@call.on_participants_change()
+async def on_vc_change(client, update: Update):
+    chat_id      = update.chat_id
+    participants = update.participants
+    humans       = [p for p in participants if not getattr(p, "is_self", False)]
+
+    if len(humans) == 0 and now_playing.get(chat_id):
+        logger.info(f"VC empty in {chat_id} — stopping stream automatically.")
+        queues[chat_id].clear()
+        now_playing.pop(chat_id, None)
+        loop_state.pop(chat_id, None)
+        try:
+            await call.leave_group_call(chat_id)
+        except Exception:
+            pass
+        try:
+            await app.send_message(
+                chat_id,
+                "🔇  <b>Voice Chat is Empty</b>\n"
+                "Music has been stopped automatically since no one is in the VC.\n"
+                "Use <code>/play</code> to start a new session when you're back!",
+                parse_mode="html"
+            )
+        except Exception:
+            pass
+
+
+# ─────────────────────────────────────────────────────
 #   /start  — Private
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 
 @app.on_message(filters.command("start") & filters.private)
 async def cmd_start(client: Client, msg: Message):
@@ -332,9 +379,9 @@ async def cmd_start(client: Client, msg: Message):
     )
 
 
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 #   /start  — Group
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 
 @app.on_message(filters.command("start") & filters.group)
 async def cmd_start_group(client: Client, msg: Message):
@@ -363,9 +410,9 @@ async def cmd_start_group(client: Client, msg: Message):
     )
 
 
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 #   /help
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 
 HELP_TEXT = (
     "🎵  <b>MusicVerse — Command Reference</b>\n"
@@ -416,9 +463,9 @@ async def cmd_help(client: Client, msg: Message):
     await send_photo_safe(client, msg.chat.id, "help", caption=HELP_TEXT, reply_markup=buttons)
 
 
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 #   /play & /forceplay
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 
 async def handle_play(client: Client, msg: Message, force: bool = False):
     chat_id = msg.chat.id
@@ -554,9 +601,9 @@ async def cmd_forceplay(client: Client, msg: Message):
     await handle_play(client, msg, force=True)
 
 
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 #   /pause & /resume
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 
 @app.on_message(filters.command("pause") & filters.group)
 async def cmd_pause(client: Client, msg: Message):
@@ -596,11 +643,12 @@ async def cmd_resume(client: Client, msg: Message):
         await msg.reply(f"❌  <b>Error:</b>  <code>{e}</code>", parse_mode="html")
 
 
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 #   /skip
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 
 async def skip_current(client: Client, chat_id: int):
+    """Leave the current call and play the next track in queue."""
     try:
         await call.leave_group_call(chat_id)
     except Exception:
@@ -627,9 +675,10 @@ async def cmd_skip(client: Client, msg: Message):
     await skip_current(client, chat_id)
 
 
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 #   /seek & /seekback
-# ─────────────────────────────────────────────────────────
+#   py-tgcalls 2.x: seek via call.play() with AudioParameters(seek=N)
+# ─────────────────────────────────────────────────────
 
 @app.on_message(filters.command(["seek", "seekback"]) & filters.group)
 async def cmd_seek(client: Client, msg: Message):
@@ -664,7 +713,15 @@ async def cmd_seek(client: Client, msg: Message):
     new_pos = max(0, min(new_pos, song["duration"]))
 
     try:
-        await call.change_stream(chat_id, MediaStream(song["file"], audio_parameters={"seek": new_pos}))
+        # py-tgcalls 2.x: replay the same file with an AudioParameters seek offset
+        await call.play(
+            chat_id,
+            MediaStream(
+                song["file"],
+                audio_parameters=AudioParameters(seek=new_pos),
+                video_flags=MediaStream.Flags.IGNORE,
+            )
+        )
         stream_start[chat_id] = time.time() - new_pos
         direction = "⏩  <b>Jumped Forward</b>" if cmd == "seek" else "⏪  <b>Jumped Backward</b>"
         await msg.reply(
@@ -675,9 +732,9 @@ async def cmd_seek(client: Client, msg: Message):
         await msg.reply(f"❌  <b>Seek Failed:</b>  <code>{e}</code>", parse_mode="html")
 
 
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 #   /queue
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 
 @app.on_message(filters.command("queue") & filters.group)
 async def cmd_queue(client: Client, msg: Message):
@@ -721,9 +778,9 @@ async def cmd_queue(client: Client, msg: Message):
     await send_photo_safe(client, chat_id, "queue", caption=text, reply_markup=buttons)
 
 
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 #   /loop
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 
 @app.on_message(filters.command("loop") & filters.group)
 async def cmd_loop(client: Client, msg: Message):
@@ -776,9 +833,9 @@ async def cmd_loop(client: Client, msg: Message):
     await send_photo_safe(client, chat_id, "loop", caption=caption, reply_markup=buttons)
 
 
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 #   /end
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 
 @app.on_message(filters.command("end") & filters.group)
 async def cmd_end(client: Client, msg: Message):
@@ -814,9 +871,9 @@ async def cmd_end(client: Client, msg: Message):
     )
 
 
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 #   /auth & /unauth
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 
 async def resolve_user(client: Client, msg: Message) -> int | None:
     parts = msg.text.split()
@@ -895,9 +952,9 @@ async def cmd_unauth(client: Client, msg: Message):
     )
 
 
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 #   /reload
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 
 @app.on_message(filters.command("reload") & filters.group)
 async def cmd_reload(client: Client, msg: Message):
@@ -913,9 +970,9 @@ async def cmd_reload(client: Client, msg: Message):
     )
 
 
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 #   /botstats
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 
 @app.on_message(filters.command("botstats"))
 async def cmd_botstats(client: Client, msg: Message):
@@ -941,9 +998,9 @@ async def cmd_botstats(client: Client, msg: Message):
     await send_photo_safe(client, msg.chat.id, "stats", caption=caption)
 
 
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 #   /broadcast
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 
 @app.on_message(filters.command("broadcast"))
 async def cmd_broadcast(client: Client, msg: Message):
@@ -986,9 +1043,9 @@ async def cmd_broadcast(client: Client, msg: Message):
     )
 
 
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 #   /approvemember & /unapprovemember
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 
 @app.on_message(filters.command("approvemember"))
 async def cmd_approve(client: Client, msg: Message):
@@ -1032,9 +1089,9 @@ async def cmd_unapprove(client: Client, msg: Message):
     )
 
 
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 #   /restart
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 
 @app.on_message(filters.command("restart"))
 async def cmd_restart(client: Client, msg: Message):
@@ -1058,40 +1115,9 @@ async def cmd_restart(client: Client, msg: Message):
     os.execl(sys.executable, sys.executable, *sys.argv)
 
 
-# ─────────────────────────────────────────────────────────
-#   AUTO-STOP WHEN VC IS EMPTY
-# ─────────────────────────────────────────────────────────
-
-@call.on_participants_change()
-async def on_vc_change(_, update):
-    chat_id      = update.chat_id
-    participants = update.participants
-    humans       = [p for p in participants if not getattr(p, "is_bot", False)]
-
-    if len(humans) == 0 and now_playing.get(chat_id):
-        logger.info(f"VC empty in {chat_id} — stopping stream automatically.")
-        queues[chat_id].clear()
-        now_playing.pop(chat_id, None)
-        loop_state.pop(chat_id, None)
-        try:
-            await call.leave_group_call(chat_id)
-        except Exception:
-            pass
-        try:
-            await app.send_message(
-                chat_id,
-                "🔇  <b>Voice Chat is Empty</b>\n"
-                "Music has been stopped automatically since no one is in the VC.\n"
-                "Use <code>/play</code> to start a new session when you're back!",
-                parse_mode="html"
-            )
-        except Exception:
-            pass
-
-
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 #   CALLBACK QUERY HANDLER
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 
 @app.on_callback_query()
 async def cb_handler(client: Client, query: CallbackQuery):
@@ -1173,9 +1199,9 @@ async def cb_handler(client: Client, query: CallbackQuery):
         await query.answer()
 
 
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 #   RUN
-# ─────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────
 
 async def main():
     logger.info("🎵 Starting MusicVerse Bot…")
