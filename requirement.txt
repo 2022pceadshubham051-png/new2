@@ -1,6 +1,0 @@
-# MusicVerse Bot Requirements
-pyrogram==2.0.106
-pytgcalls==0.9.11.2
-yt-dlp
-aiohttp
-aiofiles
