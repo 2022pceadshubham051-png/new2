@@ -103,16 +103,37 @@ YDL_OPTS = {
     'outtmpl': 'downloads/%(id)s.%(ext)s',
     'noplaylist': True,
     'quiet': True,
+    'source_address': '0.0.0.0',
+    # Put cookies.txt in the same folder as main.py
+    # Export via: yt-dlp --cookies-from-browser chrome --cookies cookies.txt "https://youtube.com" --skip-download
+    'cookiefile': 'cookies.txt' if os.path.exists('cookies.txt') else None,
 }
 
 def ydl_extract(query: str):
-    with YoutubeDL(YDL_OPTS) as ydl:
-        sq = query if query.startswith("http") else f"ytsearch:{query}"
-        info = ydl.extract_info(sq, download=True)
-        if 'entries' in info:
-            info = info['entries'][0]
-        filepath = os.path.abspath(ydl.prepare_filename(info))
-        return info, filepath
+    clients = [['ios'], ['android'], ['tv_embedded'], ['web']]
+    sq = query if query.startswith("http") else f"ytsearch:{query}"
+    last_err = None
+    for client in clients:
+        try:
+            opts = {
+                **YDL_OPTS,
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': client,
+                        'player_skip': ['webpage', 'configs'],
+                    }
+                },
+            }
+            with YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(sq, download=True)
+                if 'entries' in info:
+                    info = info['entries'][0]
+                filepath = os.path.abspath(ydl.prepare_filename(info))
+                return info, filepath
+        except Exception as e:
+            last_err = e
+            continue
+    raise last_err
 
 
 # ─────────────────────────────────────────────────────────────────────────────
